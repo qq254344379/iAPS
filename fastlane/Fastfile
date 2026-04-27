@@ -169,12 +169,24 @@ platform :ios do
     app_group_identifier = "group.com.#{TEAMID}.loopkit.LoopGroup"
     app_group = Spaceship::ConnectAPI::BundleId.find(app_group_identifier)
     unless app_group
-      app_group = Spaceship::ConnectAPI::BundleId.create(
-        name:       "LoopGroup",
-        identifier: app_group_identifier,
-        platform:   "IOS"
-      )
-      UI.message("Created App Group: #{app_group_identifier}")
+      begin
+        app_group = Spaceship::ConnectAPI::BundleId.create(
+          name:       "LoopGroup",
+          identifier: app_group_identifier,
+          platform:   "IOS"
+        )
+        UI.message("Created App Group: #{app_group_identifier}")
+      rescue Spaceship::UnexpectedResponse => e
+        if e.to_s.include?("not available") || e.to_s.include?("409")
+          UI.message("App Group already exists, re-fetching: #{app_group_identifier}")
+          app_group = Spaceship::ConnectAPI::BundleId.find(app_group_identifier)
+          unless app_group
+            UI.user_error!("Failed to find or create App Group: #{app_group_identifier}")
+          end
+        else
+          raise
+        end
+      end
     end
     UI.message("App Group resource ID: #{app_group.id}, identifier: #{app_group.identifier}")
 
