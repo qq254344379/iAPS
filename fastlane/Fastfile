@@ -25,19 +25,8 @@ ENV["FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT"] = "120"
 
 APP_IDENTIFIER = ENV.fetch('APP_IDENTIFIER') { "ru.artpancreas.#{TEAMID}.FreeAPS" }
 
-if ENV['BUILD_GROUP']
-  File.write('../ConfigOverride.xcconfig', "COPYRIGHT_NOTICE = #{ENV['BUILD_GROUP']}\n", mode: 'a')
-end
-
 if #{APP_IDENTIFIER} != "ru.artpancreas.#{TEAMID}.FreeAPS"
-  File.write('../ConfigOverride.xcconfig', "BUNDLE_IDENTIFIER = #{APP_IDENTIFIER}\n", mode: 'a')
-end
-
-if File.exist?('../ConfigOverride.xcconfig')
-  contents = File.read('../ConfigOverride.xcconfig')
-  puts "=== File Contents: ../ConfigOverride.xcconfig ==="
-  puts contents
-  puts "====================="
+  File.write('../ConfigOverride.xcconfig', "BUNDLE_IDENTIFIER = #{APP_IDENTIFIER}", mode: 'a')
 end
 
 platform :ios do
@@ -124,7 +113,7 @@ platform :ios do
 
     gym(
       export_method: "app-store",
-      scheme: "FreeAPSWorkspace",
+      scheme: "FreeAPS X",
       output_name: "iAPS.ipa",
       configuration: "Release",
       destination: 'generic/platform=iOS',
@@ -165,76 +154,32 @@ platform :ios do
       key_content: "#{FASTLANE_KEY}"
     )
 
-    # Ensure the App Group exists on Apple Developer Portal
-    app_group_identifier = "group.com.#{TEAMID}.loopkit.LoopGroup"
-    app_group = Spaceship::ConnectAPI::BundleId.find(app_group_identifier)
-    unless app_group
-      app_group = Spaceship::ConnectAPI::BundleId.create(
-        name:       "LoopGroup",
-        identifier: app_group_identifier,
-        platform:   "IOS"
-      )
-      UI.message("Created App Group: #{app_group_identifier}")
-    end
-    UI.message("App Group resource ID: #{app_group.id}, identifier: #{app_group.identifier}")
-
-    def configure_bundle_id(name, identifier, capabilities, app_group: nil)
-      bundle_id = Spaceship::ConnectAPI::BundleId.find(identifier) || Spaceship::ConnectAPI::BundleId.create(
-        name:       name,
-        identifier: identifier,
-        platform:   "IOS"
-      )
-      existing_caps = bundle_id.get_capabilities
-
-      capabilities.each do |cap|
-        existing = existing_caps.find { |c| c.capability_type == cap }
-
-        if cap == Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS && app_group
-          # For APP_GROUPS, ensure the specific app group is assigned
-          need_recreate = false
-          if existing
-            settings = existing.settings || []
-            group_setting = settings.find { |s| s["key"] == "app_group_ids" } || settings.find { |s| s[:key] == "app_group_ids" }
-            current_ids = group_setting ? (group_setting["value"] || group_setting[:value] || []) : []
-            if current_ids.include?(app_group.id)
-              UI.message("App Group #{app_group.identifier} already assigned to #{identifier}")
-              next
-            end
-            # Delete and recreate with the app group assigned
-            existing.delete!
-            need_recreate = true
-            UI.message("Deleted APP_GROUPS capability for #{identifier} to reassign App Group")
-          end
-
-          bundle_id.create_capability(cap, settings: [{ key: "app_group_ids", value: [app_group.id] }])
-          UI.message("Created APP_GROUPS capability for #{identifier} with App Group #{app_group.identifier}")
-        else
-          unless existing
-            bundle_id.create_capability(cap)
-          end
-        end
-      end
+    def configure_bundle_id(name, identifier, capabilities)
+      bundle_id = Spaceship::ConnectAPI::BundleId.find(identifier) || Spaceship::ConnectAPI::BundleId.create(name: name, identifier: identifier)
+      capabilities.each { |capability|
+        bundle_id.create_capability(capability)
+      }
     end
 
     configure_bundle_id("FreeAPS", "#{APP_IDENTIFIER}", [
       Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS,
       Spaceship::ConnectAPI::BundleIdCapability::Type::HEALTHKIT,
       Spaceship::ConnectAPI::BundleIdCapability::Type::NFC_TAG_READING
-    ], app_group: app_group)
+    ])
 
     configure_bundle_id("FreeAPSWatch WatchKit Extension", "#{APP_IDENTIFIER}.watchkitapp.watchkitextension", [
       Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS,
       Spaceship::ConnectAPI::BundleIdCapability::Type::HEALTHKIT
-    ], app_group: app_group)
+    ])
     
     configure_bundle_id("FreeAPSWatch", "#{APP_IDENTIFIER}.watchkitapp", [
       Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS,
       Spaceship::ConnectAPI::BundleIdCapability::Type::HEALTHKIT
-    ], app_group: app_group)
+    ])
 
     configure_bundle_id("LiveActivityExtension", "#{APP_IDENTIFIER}.LiveActivity", [
       Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
-    ], app_group: app_group)
+    ])
     
   end
 
@@ -251,9 +196,7 @@ platform :ios do
     
     match(
       type: "appstore",
-      readonly: false,
       force: true,
-      verbose: true,
       git_basic_authorization: Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{GH_PAT}"),
       app_identifier: [
         "#{APP_IDENTIFIER}",
@@ -305,57 +248,5 @@ platform :ios do
       skip_confirmation: true,
       git_basic_authorization: Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{GH_PAT}")
     )
-  end
-
-  desc "Check Certificates and Trigger Workflow for Expired or Missing Certificates"
-  lane :check_and_renew_certificates do
-    setup_ci if ENV['CI']
-    ENV["MATCH_READONLY"] = false.to_s
-  
-    # Authenticate using App Store Connect API Key
-    api_key = app_store_connect_api_key(
-      key_id: ENV["FASTLANE_KEY_ID"],
-      issuer_id: ENV["FASTLANE_ISSUER_ID"],
-      key_content: ENV["FASTLANE_KEY"] # Ensure valid key content
-    )
-  
-    # Initialize flag to track if renewal of certificates is needed
-    new_certificate_needed = false
-  
-    # Fetch all certificates
-    certificates = Spaceship::ConnectAPI::Certificate.all
-  
-    # Filter for Distribution Certificates
-    distribution_certs = certificates.select { |cert| cert.certificate_type == "DISTRIBUTION" }
-  
-    # Handle case where no distribution certificates are found
-    if distribution_certs.empty?
-      puts "No Distribution certificates found! Triggering action to create certificate."
-      new_certificate_needed = true
-    else
-      # Check for expiration
-      distribution_certs.each do |cert|
-        expiration_date = Time.parse(cert.expiration_date)
-  
-        puts "Current Distribution Certificate: #{cert.id}, Expiration date: #{expiration_date}"
-  
-        if expiration_date < Time.now
-          puts "Distribution Certificate #{cert.id} is expired! Triggering action to renew certificate."
-          new_certificate_needed = true
-        else
-          puts "Distribution certificate #{cert.id} is valid. No action required."
-        end
-      end
-    end
-  
-    # Write result to new_certificate_needed.txt
-    file_path = File.expand_path('new_certificate_needed.txt')
-    File.write(file_path, new_certificate_needed ? 'true' : 'false')  
-  
-    # Log the absolute path and contents of the new_certificate_needed.txt file
-    puts ""
-    puts "Absolute path of new_certificate_needed.txt: #{file_path}"
-    new_certificate_needed_content = File.read(file_path)
-    puts "Certificate creation or renewal needed: #{new_certificate_needed_content}"
   end
 end
