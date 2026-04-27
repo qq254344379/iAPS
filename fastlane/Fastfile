@@ -231,21 +231,17 @@ platform :ios do
             app_group = nil
           end
           if app_group.nil?
-          UI.important("App Group #{app_group_identifier} already exists but cannot be found via API.")
-        end
-        # Try direct App Groups API endpoint as fallback
-        if app_group.nil?
-          begin
-            client = Spaceship::ConnectAPI
-            token = client.token
-            if token
-              resp = client.get("v1/appGroups", { "filter[identifier]": app_group_identifier })
-              UI.message("App Groups API response: #{resp}")
+            UI.important("App Group #{app_group_identifier} already exists but cannot be found via API.")
+            # Try direct App Groups API endpoint as fallback
+            begin
+              token = Spaceship::ConnectAPI.token
+              if token
+                resp = Spaceship::ConnectAPI.get("v1/appGroups", { "filter[identifier]": app_group_identifier })
+                UI.message("App Groups API response: #{resp}")
+              end
+            rescue => e
+              UI.important("App Groups API fallback failed: #{e.message}")
             end
-          rescue => e
-            UI.important("App Groups API fallback failed: #{e.message}")
-          end
-        end
           end
         else
           raise
