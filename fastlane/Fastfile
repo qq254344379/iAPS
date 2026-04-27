@@ -179,10 +179,35 @@ platform :ios do
         UI.message("Created App Group: #{app_group_identifier}")
       rescue Spaceship::UnexpectedResponse => e
         if e.to_s.include?("not available") || e.to_s.include?("409")
-          UI.important("App Group #{app_group_identifier} already exists but cannot be found via API.")
-          UI.important("APP_GROUPS capability will be created without specific group assignment.")
-          UI.important("You may need to manually assign the App Group in Apple Developer Portal.")
-          app_group = nil
+          # Parse existing App Group ID from 409 error body so we can assign it to capabilities.
+          begin
+            error_body = JSON.parse(e.error_response.body)
+            # Try various Apple API response formats for existing resource ID
+            app_group_id = (
+              error_body.get("errors", [{}])[0].get("id") or
+              error_body.get("data", {}).get("id") or
+              error_body.get("error", {}).get("existingResource", {}).get("id") or
+              error_body.get("errors", [{}])[0].get("meta", {}).get("existingResource", {}).get("id")
+            )
+            app_group_ident = (
+              error_body.get("data", {}).get("attributes", {}).get("identifier") or
+              error_body.get("errors", [{}])[0].get("meta", {}).get("existingResource", {}).get("identifier") or
+              app_group_identifier
+            )
+            if app_group_id
+              app_group = OpenStruct.new(id: app_group_id, identifier: app_group_ident || app_group_identifier)
+              UI.message("Found existing App Group from 409: id=#{app_group.id}, ident=#{app_group.identifier}")
+            else
+              UI.important("Could not parse App Group ID from 409 response body.")
+              app_group = nil
+            end
+          rescue => parse_err
+            UI.important("Failed to parse 409 for App Group: #{parse_err.message}")
+            app_group = nil
+          end
+          if app_group.nil?
+            UI.important("App Group #{app_group_identifier} already exists but cannot be found via API.")
+          end
         else
           raise
         end
