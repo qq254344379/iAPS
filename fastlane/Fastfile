@@ -166,9 +166,34 @@ platform :ios do
     )
 
     # Ensure the App Group exists on Apple Developer Portal
-    # Note: BundleId.find may not return App Groups depending on API key permissions
     app_group_identifier = "group.com.#{TEAMID}.loopkit.LoopGroup"
+    
+    # Step 1: Try direct find first
     app_group = Spaceship::ConnectAPI::BundleId.find(app_group_identifier)
+    
+    # Step 2: If not found, search ALL bundle IDs for group.* patterns
+    unless app_group
+      UI.message("BundleId.find returned nil, searching all bundle IDs for App Group...")
+      begin
+        all_bundle_ids = Spaceship::ConnectAPI::BundleId.all
+        UI.message("Total Bundle IDs found: #{all_bundle_ids.count}")
+        matching_groups = all_bundle_ids.select { |b| b.identifier.start_with?("group.") }
+        UI.message("Bundle IDs starting with \'group.\': #{matching_groups.count}")
+        matching_groups.each { |g| UI.message("  Found group: #{g.identifier} (id: #{g.id})") }
+        
+        # Find exact match by suffix
+        suffix = app_group_identifier.split(".").last
+        app_group = matching_groups.find { |g| g.identifier.end_with?(".#{suffix}") }
+        
+        if app_group
+          UI.message("Found existing App Group via search: #{app_group.identifier}, id: #{app_group.id}")
+        end
+      rescue => search_err
+        UI.important("Error searching bundle IDs: #{search_err.message}")
+      end
+    end
+    
+    # Step 3: If still not found, try create (may 409 if already exists)
     unless app_group
       begin
         app_group = Spaceship::ConnectAPI::BundleId.create(
@@ -179,7 +204,7 @@ platform :ios do
         UI.message("Created App Group: #{app_group_identifier}")
       rescue Spaceship::UnexpectedResponse => e
         if e.to_s.include?("not available") || e.to_s.include?("409")
-          # Parse existing App Group ID from 409 error body so we can assign it to capabilities.
+          # Try multiple error body parsing approaches
           begin
             error_body = JSON.parse(e.error_response.body)
             # Try various Apple API response formats for existing resource ID
