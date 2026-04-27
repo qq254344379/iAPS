@@ -231,7 +231,21 @@ platform :ios do
             app_group = nil
           end
           if app_group.nil?
-            UI.important("App Group #{app_group_identifier} already exists but cannot be found via API.")
+          UI.important("App Group #{app_group_identifier} already exists but cannot be found via API.")
+        end
+        # Try direct App Groups API endpoint as fallback
+        if app_group.nil?
+          begin
+            client = Spaceship::ConnectAPI
+            token = client.token
+            if token
+              resp = client.get("v1/appGroups", { "filter[identifier]": app_group_identifier })
+              UI.message("App Groups API response: #{resp}")
+            end
+          rescue => e
+            UI.important("App Groups API fallback failed: #{e.message}")
+          end
+        end
           end
         else
           raise
@@ -272,12 +286,24 @@ platform :ios do
             bundle_id.create_capability(cap, settings: [{ key: "app_group_ids", value: [app_group.id] }])
             UI.message("Created APP_GROUPS capability for #{identifier} with App Group #{app_group.identifier}")
           else
-            # No app_group resource available - just create the capability without specific group
-            unless existing
+            # No app_group resource available - try to extract from existing capability settings
+            if existing
+              settings = existing.settings || []
+              group_setting = settings.find { |s| s["key"] == "app_group_ids" } || settings.find { |s| s[:key] == "app_group_ids" }
+              if group_setting
+                existing_ids = group_setting["value"] || group_setting[:value] || []
+                if existing_ids.any?
+                  UI.message("Found existing app_group_ids from capability: #{existing_ids.inspect}")
+                  existing.delete!
+                  bundle_id.create_capability(cap, settings: [{ key: "app_group_ids", value: existing_ids }])
+                  UI.message("Re-created APP_GROUPS capability for #{identifier} with existing IDs")
+                  next
+                end
+              end
+              UI.message("APP_GROUPS capability already exists for #{identifier} (no app_group_ids in settings)")
+            else
               bundle_id.create_capability(cap)
               UI.message("Created APP_GROUPS capability for #{identifier} (without specific group assignment)")
-            else
-              UI.message("APP_GROUPS capability already exists for #{identifier}")
             end
           end
         else
@@ -288,11 +314,32 @@ platform :ios do
       end
     end
 
+    # Step 1: Configure FreeAPS first
     configure_bundle_id("FreeAPS", "#{APP_IDENTIFIER}", [
       Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS,
       Spaceship::ConnectAPI::BundleIdCapability::Type::HEALTHKIT,
       Spaceship::ConnectAPI::BundleIdCapability::Type::NFC_TAG_READING
     ], app_group: app_group)
+
+    # Step 2: If app_group is still nil, extract from FreeAPS capability
+    unless app_group
+      freeaps_bundle = Spaceship::ConnectAPI::BundleId.find(APP_IDENTIFIER)
+      if freeaps_bundle
+        freeaps_caps = freeaps_bundle.get_capabilities
+        app_group_cap = freeaps_caps.find { |c| c.capability_type == Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS }
+        if app_group_cap
+          settings = app_group_cap.settings || []
+          group_setting = settings.find { |s| s["key"] == "app_group_ids" } || settings.find { |s| s[:key] == "app_group_ids" }
+          if group_setting
+            ids = group_setting["value"] || group_setting[:value] || []
+            if ids.any?
+              app_group = OpenStruct.new(id: ids.first, identifier: app_group_identifier)
+              UI.message("Extracted App Group from FreeAPS: id=#{app_group.id}")
+            end
+          end
+        end
+      end
+    end
 
     configure_bundle_id("FreeAPSWatch WatchKit Extension", "#{APP_IDENTIFIER}.watchkitapp.watchkitextension", [
       Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS,
