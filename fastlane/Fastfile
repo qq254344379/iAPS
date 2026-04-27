@@ -166,8 +166,14 @@ platform :ios do
     )
 
     # Ensure the App Group exists on Apple Developer Portal
+    # Note: BundleId.find may not locate App Groups; use BundleId.all as fallback
     app_group_identifier = "group.com.#{TEAMID}.loopkit.LoopGroup"
     app_group = Spaceship::ConnectAPI::BundleId.find(app_group_identifier)
+    unless app_group
+      # Try listing all bundle IDs and filtering for the App Group
+      all_ids = Spaceship::ConnectAPI::BundleId.all
+      app_group = all_ids.find { |b| b.identifier == app_group_identifier }
+    end
     unless app_group
       begin
         app_group = Spaceship::ConnectAPI::BundleId.create(
@@ -178,8 +184,9 @@ platform :ios do
         UI.message("Created App Group: #{app_group_identifier}")
       rescue Spaceship::UnexpectedResponse => e
         if e.to_s.include?("not available") || e.to_s.include?("409")
-          UI.message("App Group already exists, re-fetching: #{app_group_identifier}")
-          app_group = Spaceship::ConnectAPI::BundleId.find(app_group_identifier)
+          UI.message("App Group already exists but not findable via API, retrying full list...")
+          all_ids = Spaceship::ConnectAPI::BundleId.all
+          app_group = all_ids.find { |b| b.identifier == app_group_identifier }
           unless app_group
             UI.user_error!("Failed to find or create App Group: #{app_group_identifier}")
           end
