@@ -166,14 +166,9 @@ platform :ios do
     )
 
     # Ensure the App Group exists on Apple Developer Portal
-    # Note: BundleId.find may not locate App Groups; use BundleId.all as fallback
+    # Note: BundleId.find may not return App Groups depending on API key permissions
     app_group_identifier = "group.com.#{TEAMID}.loopkit.LoopGroup"
     app_group = Spaceship::ConnectAPI::BundleId.find(app_group_identifier)
-    unless app_group
-      # Try listing all bundle IDs and filtering for the App Group
-      all_ids = Spaceship::ConnectAPI::BundleId.all
-      app_group = all_ids.find { |b| b.identifier == app_group_identifier }
-    end
     unless app_group
       begin
         app_group = Spaceship::ConnectAPI::BundleId.create(
@@ -184,18 +179,18 @@ platform :ios do
         UI.message("Created App Group: #{app_group_identifier}")
       rescue Spaceship::UnexpectedResponse => e
         if e.to_s.include?("not available") || e.to_s.include?("409")
-          UI.message("App Group already exists but not findable via API, retrying full list...")
-          all_ids = Spaceship::ConnectAPI::BundleId.all
-          app_group = all_ids.find { |b| b.identifier == app_group_identifier }
-          unless app_group
-            UI.user_error!("Failed to find or create App Group: #{app_group_identifier}")
-          end
+          UI.important("App Group #{app_group_identifier} already exists but cannot be found via API.")
+          UI.important("APP_GROUPS capability will be created without specific group assignment.")
+          UI.important("You may need to manually assign the App Group in Apple Developer Portal.")
+          app_group = nil
         else
           raise
         end
       end
     end
-    UI.message("App Group resource ID: #{app_group.id}, identifier: #{app_group.identifier}")
+    if app_group
+      UI.message("App Group resource ID: #{app_group.id}, identifier: #{app_group.identifier}")
+    end
 
     def configure_bundle_id(name, identifier, capabilities, app_group: nil)
       bundle_id = Spaceship::ConnectAPI::BundleId.find(identifier) || Spaceship::ConnectAPI::BundleId.create(
@@ -208,25 +203,33 @@ platform :ios do
       capabilities.each do |cap|
         existing = existing_caps.find { |c| c.capability_type == cap }
 
-        if cap == Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS && app_group
-          # For APP_GROUPS, ensure the specific app group is assigned
-          need_recreate = false
-          if existing
-            settings = existing.settings || []
-            group_setting = settings.find { |s| s["key"] == "app_group_ids" } || settings.find { |s| s[:key] == "app_group_ids" }
-            current_ids = group_setting ? (group_setting["value"] || group_setting[:value] || []) : []
-            if current_ids.include?(app_group.id)
-              UI.message("App Group #{app_group.identifier} already assigned to #{identifier}")
-              next
+        if cap == Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
+          if app_group
+            # For APP_GROUPS, ensure the specific app group is assigned
+            if existing
+              settings = existing.settings || []
+              group_setting = settings.find { |s| s["key"] == "app_group_ids" } || settings.find { |s| s[:key] == "app_group_ids" }
+              current_ids = group_setting ? (group_setting["value"] || group_setting[:value] || []) : []
+              if current_ids.include?(app_group.id)
+                UI.message("App Group #{app_group.identifier} already assigned to #{identifier}")
+                next
+              end
+              # Delete and recreate with the app group assigned
+              existing.delete!
+              UI.message("Deleted APP_GROUPS capability for #{identifier} to reassign App Group")
             end
-            # Delete and recreate with the app group assigned
-            existing.delete!
-            need_recreate = true
-            UI.message("Deleted APP_GROUPS capability for #{identifier} to reassign App Group")
-          end
 
-          bundle_id.create_capability(cap, settings: [{ key: "app_group_ids", value: [app_group.id] }])
-          UI.message("Created APP_GROUPS capability for #{identifier} with App Group #{app_group.identifier}")
+            bundle_id.create_capability(cap, settings: [{ key: "app_group_ids", value: [app_group.id] }])
+            UI.message("Created APP_GROUPS capability for #{identifier} with App Group #{app_group.identifier}")
+          else
+            # No app_group resource available - just create the capability without specific group
+            unless existing
+              bundle_id.create_capability(cap)
+              UI.message("Created APP_GROUPS capability for #{identifier} (without specific group assignment)")
+            else
+              UI.message("APP_GROUPS capability already exists for #{identifier}")
+            end
+          end
         else
           unless existing
             bundle_id.create_capability(cap)
